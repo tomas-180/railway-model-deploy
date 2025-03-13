@@ -1,120 +1,104 @@
-import os
-import json
+from flask import Flask, request, jsonify
 import pickle
-import joblib
+import sqlite3
+import json
 import pandas as pd
-from flask import Flask, jsonify, request
-from peewee import (
-    Model, IntegerField, FloatField,
-    TextField, IntegrityError
-)
-from playhouse.shortcuts import model_to_dict
-from playhouse.db_url import connect
-
-########################################
-# Configuração do Banco de Dados
-
-# Conecta ao SQLite (ou a um banco de dados remoto, se DATABASE_URL estiver definido)
-DB = connect(os.environ.get('DATABASE_URL') or 'sqlite:///predictions.db')
-
-class Prediction(Model):
-    observation_id = IntegerField(unique=True)  # ID único da observação
-    observation = TextField()  # Observação em formato JSON
-    proba = FloatField()  # Probabilidade prevista
-    true_class = IntegerField(null=True)  # Classe verdadeira (inicialmente nula)
-
-    class Meta:
-        database = DB
-
-# Cria a tabela no banco de dados, se não existir
-DB.create_tables([Prediction], safe=True)
-
-########################################
-# Carregando o Modelo e Configurações
-
-# Carrega as colunas esperadas
-with open('columns.json') as fh:
-    columns = json.load(fh)
-
-# Carrega o pipeline do modelo
-pipeline = joblib.load('pipeline.pickle')
-
-# Carrega os tipos de dados esperados
-with open('dtypes.pickle', 'rb') as fh:
-    dtypes = pickle.load(fh)
-
-########################################
-# Configuração do Flask
+import joblib
 
 app = Flask(__name__)
 
+# Carregar modelo treinado e colunas esperadas
+with open('columns.json', 'r') as fh:
+    columns = json.load(fh)
+
+pipeline = joblib.load('pipeline.pickle')
+
+# Criar a base de dados SQLite se não existir
+conn = sqlite3.connect('predictions.db', check_same_thread=False)
+cursor = conn.cursor()
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS predictions (
+        id TEXT PRIMARY KEY,
+        observation TEXT,
+        proba REAL,
+        true_class TEXT
+    )
+''')
+conn.commit()
+
 @app.route('/predict', methods=['POST'])
 def predict():
-    # Recebe o JSON da requisição
-    obs_dict = request.get_json()
-
-    # Extrai o ID e a observação
-    _id = obs_dict.get('id')
-    observation = obs_dict.get('observation')
-
-    # Valida se o ID e a observação estão presentes
-    if not _id or not observation:
-        return jsonify({"error": "ID e observation são obrigatórios"}), 400
-
-    # Valida os campos da observação
-    required_fields = ['age', 'education', 'hours-per-week', 'native-country']
-    if not all(field in observation for field in required_fields):
-        return jsonify({"error": f"A observação deve conter os campos: {required_fields}"}), 400
-
-    # Converte a observação em um DataFrame
     try:
-        obs = pd.DataFrame([observation], columns=columns).astype(dtypes)
-    except (ValueError, TypeError) as e:
-        return jsonify({"error": f"Dados de observação inválidos: {str(e)}"}), 400
+        # Receber JSON
+        data = request.get_json()
 
-    # Faz a previsão usando o modelo
-    proba = pipeline.predict_proba(obs)[0, 1]
+        # Validar estrutura do JSON
+        if "id" not in data or "observation" not in data:
+            return jsonify({"error": "Faltam campos obrigatórios (id, observation)"}), 400
 
-    # Tenta salvar no banco de dados
-    try:
-        p = Prediction(
-            observation_id=_id,
-            observation=json.dumps(observation),  # Salva a observação como JSON
-            proba=proba
+        obs_id = data["id"]
+        observation = data["observation"]
+
+        # Verificar se o ID já existe na BD
+        cursor.execute("SELECT * FROM predictions WHERE id = ?", (obs_id,))
+        if cursor.fetchone():
+            return jsonify({"error": "ID ja existe", "id": obs_id}), 400
+
+        # Converter para DataFrame e garantir ordem correta das colunas
+        obs_df = pd.DataFrame([observation], columns=columns)
+
+        # Fazer previsão
+        proba = pipeline.predict_proba(obs_df)[:, 1][0]
+
+        # Guardar na base de dados
+        cursor.execute(
+            "INSERT INTO predictions (id, observation, proba, true_class) VALUES (?, ?, ?, ?)",
+            (obs_id, json.dumps(observation), proba, None)
         )
-        p.save()
-    except IntegrityError:
-        # Se o ID já existir, retorna um erro e a probabilidade correspondente
-        existing_prediction = Prediction.get(Prediction.observation_id == _id)
-        return jsonify({
-            "error": f"Observation ID {_id} já existe",
-            "proba": existing_prediction.proba
-        }), 400
+        conn.commit()
 
-    # Retorna a probabilidade prevista
-    return jsonify({"id": _id, "proba": proba})
+        return jsonify({"id": obs_id, "probability": proba})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/update', methods=['POST'])
 def update():
-    # Atualiza a classe verdadeira (true_class) de uma observação existente
-    obs = request.get_json()
     try:
-        p = Prediction.get(Prediction.observation_id == obs['id'])
-        p.true_class = obs['true_class']
-        p.save()
-        return jsonify(model_to_dict(p))
-    except Prediction.DoesNotExist:
-        return jsonify({"error": f"Observation ID {obs['id']} não existe"}), 404
+        # Receber JSON
+        data = request.get_json()
 
-@app.route('/list-db-contents')
-def list_db_contents():
-    # Lista todo o conteúdo do banco de dados
-    return jsonify([
-        model_to_dict(obs) for obs in Prediction.select()
-    ])
+        # Validar estrutura do JSON
+        if "id" not in data or "true_class" not in data:
+            return jsonify({"error": "Faltam campos obrigatórios (id, true_class)"}), 400
 
-########################################
-# Execução do Aplicativo
+        obs_id = data["id"]
+        true_class = data["true_class"]
 
-if __name__ == "__main__":
-    app.run(host='0.0.0.0', debug=True, port=5000)
+        # Verificar se o ID existe na BD
+        cursor.execute("SELECT * FROM predictions WHERE id = ?", (obs_id,))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({"error": "ID não encontrado", "id": obs_id}), 404
+
+        # Atualizar true_class
+        cursor.execute("UPDATE predictions SET true_class = ? WHERE id = ?", (true_class, obs_id))
+        conn.commit()
+
+        # Retornar observação atualizada
+        return jsonify({"id": obs_id, "observation": json.loads(row[1]), "probability": row[2], "true_class": true_class})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# Executar a aplicação
+if __name__ == '__main__':
+    app.run(debug=True)
+
+
+
+
+
+
+
+

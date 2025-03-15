@@ -60,58 +60,61 @@ app = Flask(__name__)
 
 @app.route('/predict', methods=['POST'])
 def predict():
-    # Deserialize the JSON payload
+    # Flask provides a deserialization convenience function called
+    # get_json that will work if the mimetype is application/json.
     obs_dict = request.get_json()
+    
     _id = obs_dict.get('id')
     observation = obs_dict.get('observation')
-
-    # Validate the observation
+    
     if not observation:
-        return jsonify({'error': 'Observation data is missing'}), 400
+        return jsonify({'error': 'Observation is missing!'}), 400
 
-    # Check if all required fields are present
-    required_fields = list(dtypes.keys())  # Use the keys from dtypes as required fields
-    for field in required_fields:
-        if field not in observation:
-            return jsonify({'error': f'Missing required field: {field}'}), 400
+    # Example: check that required keys are in the observation and that their values are valid.
+    required_columns = columns  # The columns expected by your model
+    for col in required_columns:
+        if col not in observation:
+            return jsonify({'error': f'Missing required field: {col}'}), 400
+        
+        value = observation[col]
+        
+        # Add validation for specific fields
+        if col == 'age':
+            try:
+                observation[col] = float(value)
+            except ValueError:
+                return jsonify({'error': f'Invalid value for age: {value}'}), 400
+        
+        elif col == 'hours-per-week':
+            try:
+        # Validate that hours-per-week is a number
+                observation[col] = float(value)
+            except ValueError:
+                return jsonify({'error': f'Invalid value for hours-per-week: {value}. Please provide a valid number.'}), 400
+        
+        elif col == 'education':
+            if value not in ['Bachelors', 'Masters', 'PhD', 'HS-grad']:  # Modify as per your valid values
+                return jsonify({'error': f'Invalid value for education: {value}'}), 400
+        
+        # You can add more checks for other fields as well
+    
+    # Now do what we already learned in the notebooks about how to transform
+    # a single observation into a dataframe that will work with a pipeline.
+    obs = pd.DataFrame([observation], columns=columns).astype(dtypes)
 
-    # Validate data types using the dtypes dictionary
-    for field, expected_dtype in dtypes.items():
-        value = observation.get(field)
-        if value is None:
-            continue  # Skip if the field is optional (not in required_fields)
-
-        try:
-            # Attempt to convert the value to the expected data type
-            if expected_dtype == 'int64':
-                observation[field] = int(value)
-            elif expected_dtype == 'float64':
-                observation[field] = float(value)
-            elif expected_dtype == 'object':
-                observation[field] = str(value)
-            else:
-                return jsonify({'error': f'Unsupported data type for field {field}: {expected_dtype}'}), 400
-        except (ValueError, TypeError):
-            return jsonify({'error': f'Invalid value for field {field}. Expected type: {expected_dtype}'}), 400
-
-    # Convert the observation into a DataFrame
-    try:
-        obs = pd.DataFrame([observation], columns=columns).astype(dtypes)
-    except Exception as e:
-        return jsonify({'error': f'Invalid observation data: {str(e)}'}), 400
-
-    # Make a prediction
+    # Now get ourselves an actual prediction of the positive class.
     try:
         proba = pipeline.predict_proba(obs)[0, 1]
     except Exception as e:
         return jsonify({'error': f'Prediction failed: {str(e)}'}), 500
 
-    # Save the prediction to the database
     response = {'proba': proba}
+
+    # Save the prediction to the database
     p = Prediction(
         observation_id=_id,
         proba=proba,
-        observation=json.dumps(observation)  # Store the observation as a JSON string
+        observation=request.data
     )
     try:
         p.save()
@@ -149,7 +152,6 @@ def list_db_contents():
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', debug=True, port=5000)
-
 
 
 

@@ -7,7 +7,7 @@ from peewee import *
 app = Flask(__name__)
 
 # Conectar ao banco de dados SQLite com Peewee
-DB = SqliteDatabase('predictions.db')
+DB = connect(os.environ.get('DATABASE_URL') or 'sqlite:///predictions.db')
 
 
 # Definir o modelo da tabela usando Peewee
@@ -94,8 +94,7 @@ def update():
 
 
 if __name__ == '__main__':
-    app.run(debug=True)
-
+    app.run(host='0.0.0.0', debug=True, port=5000)
 
 
 

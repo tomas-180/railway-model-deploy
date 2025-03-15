@@ -3,7 +3,9 @@ import json
 import pandas as pd
 import joblib
 from peewee import *
-
+from playhouse.shortcuts import model_to_dict
+from playhouse.db_url import connect
+import os
 app = Flask(__name__)
 
 # Conectar ao banco de dados SQLite com Peewee
